@@ -1,0 +1,100 @@
+import os
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import accuracy_score
+import matplotlib.pyplot as plt
+
+def prepare_data_files(folder_path, reference_file):
+    # Load the reference file containing valid tickers
+    reference_tickers = pd.read_csv(reference_file)['<ticker>'].unique()
+
+    # Process and filter each file in memory
+    def filter_data(file_path):
+        data = pd.read_csv(file_path)
+        if '<ticker>' not in data.columns:
+            raise ValueError(f"Ticker column missing in {file_path}")
+        return data[data['<ticker>'].isin(reference_tickers)]
+
+    return filter_data
+
+def prepare_data(data):
+    data['Pct_Change'] = (data['close'].shift(-1) - data['close']) / data['close']
+    return data
+
+def train_model(data):
+    data = data.dropna()
+    X = data[['open', 'high', 'low', 'close', 'vol']]
+    y = (data['Pct_Change'] >= 0.02).astype(int)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    param_grid = {
+        'n_estimators': [50, 100],
+        'max_depth': [5, 10],
+        'min_samples_split': [2, 5]
+    }
+
+    model = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=3)
+    model.fit(X_train, y_train)
+
+    best_model = model.best_estimator_
+    y_pred = best_model.predict(X_test)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"Model Training Accuracy: {accuracy:.2f}")
+
+    return best_model
+
+def save_to_csv(output_folder, file_name, data):
+    os.makedirs(output_folder, exist_ok=True)
+    file_path = os.path.join(output_folder, file_name)
+    data.to_csv(file_path, index=False)
+    print(f"Saved: {file_path}")
+
+def main(folder_path, reference_file):
+    filter_data = prepare_data_files(folder_path, reference_file)
+    
+    files = sorted([f for f in os.listdir(folder_path) if f.endswith('.csv')])
+    model = None
+    output_folder = os.path.join(os.path.dirname(folder_path), "OutputNy")
+
+    for i in range(len(files) - 5):
+        current_files = files[i:i+5]
+        next_file = files[i+5]
+
+        # Filter and load data in memory
+        data = pd.concat([filter_data(os.path.join(folder_path, file)) for file in current_files])
+        next_data = filter_data(os.path.join(folder_path, next_file))
+
+        expected_columns = ['<ticker>', '<date>', '<open>', '<high>', '<low>', '<close>', '<vol>']
+        if list(data.columns) != expected_columns or list(next_data.columns) != expected_columns:
+            raise ValueError("CSV files must have the following columns: <ticker>, <date>, <open>, <high>, <low>, <close>, <vol>")
+
+        data.rename(columns={"<ticker>": "ticker", "<date>": "date", "<open>": "open", "<high>": "high", "<low>": "low", "<close>": "close", "<vol>": "vol"}, inplace=True)
+        next_data.rename(columns={"<ticker>": "ticker", "<date>": "date", "<open>": "open", "<high>": "high", "<low>": "low", "<close>": "close", "<vol>": "vol"}, inplace=True)
+
+        data['date'] = pd.to_datetime(data['date'], format='%Y%m%d')
+        next_data['date'] = pd.to_datetime(next_data['date'], format='%Y%m%d')
+        data.sort_values('date', inplace=True)
+        next_data.sort_values('date', inplace=True)
+
+        data = prepare_data(data)
+        next_data = prepare_data(next_data)
+
+        if model is None:
+            model = train_model(data)
+
+        X_next = next_data[['open', 'high', 'low', 'close', 'vol']]
+        
+        # Generate rankings based on predicted probability
+        next_data['Predicted_Probability'] = model.predict_proba(X_next)[:, 1]
+        ranked_data = next_data[['ticker', 'date', 'close', 'Predicted_Probability']]
+        ranked_data = ranked_data.sort_values(by='Predicted_Probability', ascending=False)
+
+        save_to_csv(output_folder, f"rankings_{i+1}.csv", ranked_data)
+
+if __name__ == "__main__":
+    folder_path = "Folder that contains the files for different Market Daily Data CSV files"
+    reference_file = "The reference file which you use to filter symbols that may be of less interest.csv"
+    main(folder_path, reference_file)
